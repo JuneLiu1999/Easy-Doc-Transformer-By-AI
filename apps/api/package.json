@@ -1,0 +1,25 @@
+{
+  "name": "@apps/api",
+  "version": "0.1.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "npm exec -- tsx src/server.ts",
+    "build": "npm exec -- tsc -p tsconfig.json",
+    "typecheck": "npm exec -- tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "test": "echo test"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@fastify/multipart": "^9.2.1",
+    "@packages/blocks": "0.1.0",
+    "@packages/llm": "0.1.0",
+    "@packages/renderer": "0.1.0",
+    "fastify": "^5.6.1",
+    "mammoth": "^1.9.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5",
+    "@types/node": "^24.3.0"
+  }
+}

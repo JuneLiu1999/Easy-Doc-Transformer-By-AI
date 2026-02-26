@@ -1,0 +1,25 @@
+{
+  "name": "@apps/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm exec -- next dev -p 3000",
+    "build": "npm exec -- next build",
+    "start": "npm exec -- next start -p 3000",
+    "typecheck": "npm exec -- tsc -p tsconfig.json --noEmit",
+    "test": "echo test"
+  },
+  "dependencies": {
+    "@packages/editor": "0.1.0",
+    "next": "15.5.3",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "@packages/blocks": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7"
+  }
+}

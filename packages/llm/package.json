@@ -1,0 +1,14 @@
+{
+  "name": "@packages/llm",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "dev": "echo dev",
+    "build": "echo build",
+    "test": "echo test"
+  },
+  "dependencies": {
+    "@packages/blocks": "0.1.0"
+  }
+}

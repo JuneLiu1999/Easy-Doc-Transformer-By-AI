@@ -1,0 +1,21 @@
+{
+  "name": "doc-block-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Doc -> Block JSON -> Themed Render -> Editable -> Static Export platform monorepo",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "dev:web": "npm run dev --workspace @apps/web",
+    "dev:api": "npm run dev --workspace @apps/api",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "fix:bom": "node scripts/strip-bom.mjs"
+  }
+}

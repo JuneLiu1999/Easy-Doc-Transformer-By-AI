@@ -1,0 +1,18 @@
+{
+  "name": "@packages/blocks",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "dev": "echo dev",
+    "build": "echo build",
+    "typecheck": "npm exec -- tsc -p tsconfig.json --noEmit",
+    "test": "npm exec -- tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@packages/editor",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "echo dev",
+    "build": "echo build",
+    "test": "echo test"
+  }
+}
