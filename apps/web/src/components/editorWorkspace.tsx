@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -41,6 +41,14 @@ type DeployResult = {
   remoteUrl: string | null;
 };
 
+type SidebarModule = "document" | "ai" | "publish";
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+};
+
 function BlockView({ block, selected }: { block: Block; selected: boolean }) {
   return (
     <section data-block-id={block.id} className={`demo-block ${selected ? "demo-block-selected" : ""}`}>
@@ -61,17 +69,19 @@ function BlockView({ block, selected }: { block: Block; selected: boolean }) {
 
 export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
   const router = useRouter();
+  const [activeModule, setActiveModule] = useState<SidebarModule>("ai");
   const [currentPageId, setCurrentPageId] = useState(initialPageId);
   const [page, setPage] = useState<Page | null>(null);
+  const [hasImportedDoc, setHasImportedDoc] = useState(initialPageId !== "demo");
+
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [undoing, setUndoing] = useState(false);
   const [patching, setPatching] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [importing, setImporting] = useState(false);
+
   const [message, setMessage] = useState("");
-  const [instruction, setInstruction] = useState("");
-  const [popoverPos, setPopoverPos] = useState<{ x: number; y: number } | null>(null);
   const [customSlug, setCustomSlug] = useState("");
   const [exportHostname, setExportHostname] = useState("");
   const [deployBaseDir, setDeployBaseDir] = useState("/var/www/reports");
@@ -83,17 +93,22 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
   const [deployResult, setDeployResult] = useState<DeployResult | null>(null);
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
   const [deployText, setDeployText] = useState("");
+
   const [llmSettings, setLlmSettings] = useState<LlmSettings>({
     baseUrl: DEFAULT_BASE_URL,
     model: "",
     apiKey: ""
   });
 
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const { isSelectingMode, selectedIds, selectionRect, enterSelectingMode, exitSelectingMode, clearSelection } =
     useBlockSelection(containerRef);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
   const computedRemoteRootDir = useMemo(() => {
     if (!exportResult) {
       return "";
@@ -103,8 +118,11 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
     return `${base}/${relative}`.replace(/\/+/g, "/");
   }, [deployBaseDir, exportResult]);
 
+  const shouldShowPreview = Boolean(page) && (currentPageId !== "demo" || hasImportedDoc);
+
   useEffect(() => {
     setCurrentPageId(initialPageId);
+    setHasImportedDoc(initialPageId !== "demo");
   }, [initialPageId]);
 
   useEffect(() => {
@@ -117,6 +135,9 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
         }
         const data = (await response.json()) as Page;
         setPage(data);
+        if (currentPageId !== "demo") {
+          setHasImportedDoc(true);
+        }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : "Unknown error");
       } finally {
@@ -148,42 +169,6 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
     window.sessionStorage.setItem(LLM_SETTINGS_KEY, JSON.stringify(llmSettings));
   }, [llmSettings]);
 
-  useEffect(() => {
-    if (!isSelectingMode || selectedIds.length === 0) {
-      setPopoverPos(null);
-      return;
-    }
-
-    const container = containerRef.current;
-    if (!container) {
-      return;
-    }
-
-    const blockElements = Array.from(container.querySelectorAll<HTMLElement>("[data-block-id]")).filter((element) => {
-      const id = element.dataset.blockId;
-      return typeof id === "string" && selectedSet.has(id);
-    });
-
-    if (blockElements.length === 0) {
-      setPopoverPos(null);
-      return;
-    }
-
-    let top = Number.POSITIVE_INFINITY;
-    let right = Number.NEGATIVE_INFINITY;
-
-    for (const element of blockElements) {
-      const rect = element.getBoundingClientRect();
-      top = Math.min(top, rect.top);
-      right = Math.max(right, rect.right);
-    }
-
-    setPopoverPos({
-      x: Math.min(right + 12, window.innerWidth - 320),
-      y: Math.max(12, top - 8)
-    });
-  }, [isSelectingMode, selectedIds, selectedSet]);
-
   const handleImportDocx = async (file: File) => {
     setImporting(true);
     setMessage("");
@@ -199,10 +184,12 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
         throw new Error(result.error ?? `Import failed (${response.status})`);
       }
 
+      setHasImportedDoc(true);
       setCurrentPageId(result.pageId);
       setPage(result.page);
       router.push(`/page/${result.pageId}`);
       setMessage(`Imported page: ${result.pageId}`);
+      setActiveModule("ai");
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown import error";
       window.alert(errorMessage);
@@ -216,6 +203,11 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
   };
 
   const handlePublish = async () => {
+    if (!shouldShowPreview) {
+      setMessage("Please import a .docx file before publishing.");
+      return;
+    }
+
     setExporting(true);
     setMessage("");
     setExportResult(null);
@@ -279,8 +271,8 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
     }
   };
 
-  const handleApplySelectionPatch = async () => {
-    if (selectedIds.length === 0 || !instruction.trim()) {
+  const handleApplyAiChat = async () => {
+    if (selectedIds.length === 0 || !chatInput.trim()) {
       return;
     }
     if (!llmSettings.apiKey.trim()) {
@@ -290,6 +282,8 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
       return;
     }
 
+    const userText = chatInput.trim();
+    setChatMessages((prev) => [...prev, { id: `${Date.now()}-u`, role: "user", text: userText }]);
     setPatching(true);
     setMessage("");
 
@@ -309,7 +303,7 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
         body: JSON.stringify({
           pageId: currentPageId,
           selectedBlockIds: selectedIds,
-          instruction
+          instruction: userText
         })
       });
 
@@ -319,12 +313,15 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
       }
 
       setPage(result.page);
-      setInstruction("");
-      clearSelection();
-      exitSelectingMode();
+      setChatInput("");
+      setChatMessages((prev) => [
+        ...prev,
+        { id: `${Date.now()}-a`, role: "assistant", text: `Patch applied to ${selectedIds.length} block(s).` }
+      ]);
       setMessage("AI patch applied");
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown patch error";
+      setChatMessages((prev) => [...prev, { id: `${Date.now()}-e`, role: "assistant", text: errorMessage }]);
       window.alert(errorMessage);
       setMessage(errorMessage);
     } finally {
@@ -419,212 +416,246 @@ export function EditorWorkspace({ initialPageId }: { initialPageId: string }) {
     if (isSelectingMode) {
       clearSelection();
       exitSelectingMode();
-      setInstruction("");
+      setChatInput("");
       return;
     }
     enterSelectingMode();
   };
 
   return (
-    <main>
-      <div className="panel">
-        <h1>Editor - {currentPageId}</h1>
-        <div className="toolbar">
-          <button type="button" onClick={toggleSelectingMode} disabled={patching}>
-            {isSelectingMode ? "Exit AI Select" : "AI Select"}
-          </button>
-          {isSelectingMode ? (
-            <button
-              type="button"
-              onClick={() => {
-                clearSelection();
-                setInstruction("");
-              }}
-            >
-              Clear selection
-            </button>
+    <main className="workspace-main">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".docx"
+        style={{ display: "none" }}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) {
+            void handleImportDocx(file);
+          }
+        }}
+      />
+
+      <div className="workspace-shell">
+        <section className="preview-pane">
+          <div className="pane-header">
+            <h1>Web Preview</h1>
+            <p>Page: {currentPageId}</p>
+          </div>
+
+          <div ref={containerRef} className={isSelectingMode ? "preview-canvas selecting-surface selecting-active" : "preview-canvas selecting-surface"}>
+            {loading ? <p>Loading...</p> : null}
+            {!loading && shouldShowPreview && page ? page.blocks.map((block) => <BlockView key={block.id} block={block} selected={selectedSet.has(block.id)} />) : null}
+            {!loading && !shouldShowPreview ? (
+              <div className="preview-empty">
+                <h2>等待内容</h2>
+                <p>左侧展示区默认空白，请在右侧 Document 模块上传 .docx 后预览内容。</p>
+              </div>
+            ) : null}
+          </div>
+
+          {selectionRect ? (
+            <div className="selection-rect" style={{ left: selectionRect.x, top: selectionRect.y, width: selectionRect.w, height: selectionRect.h }} />
           ) : null}
-          <button type="button" onClick={handleUndo} disabled={undoing || patching}>
-            {undoing ? "Undoing..." : "Undo"}
-          </button>
-          <button type="button" onClick={handlePublish} disabled={exporting}>
-            {exporting ? "Publishing..." : "Publish"}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".docx"
-            style={{ display: "none" }}
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) {
-                void handleImportDocx(file);
-              }
-            }}
-          />
-          <button type="button" disabled={importing} onClick={() => fileInputRef.current?.click()}>
-            {importing ? "Importing..." : "Import .docx"}
-          </button>
-        </div>
+        </section>
 
-        <details className="settings-panel">
-          <summary>AI Settings</summary>
-          <div className="settings-grid">
-            <label>
-              Base URL
-              <input value={llmSettings.baseUrl} onChange={(event) => setLlmSettings((prev) => ({ ...prev, baseUrl: event.target.value }))} />
-            </label>
-            <label>
-              API Key
-              <input type="password" value={llmSettings.apiKey} onChange={(event) => setLlmSettings((prev) => ({ ...prev, apiKey: event.target.value }))} />
-            </label>
-            <details className="advanced-settings">
-              <summary>Advanced</summary>
-              <label>
-                Model (optional)
-                <input
-                  value={llmSettings.model}
-                  placeholder={DEFAULT_MODEL}
-                  onChange={(event) => setLlmSettings((prev) => ({ ...prev, model: event.target.value }))}
-                />
-              </label>
-            </details>
-          </div>
-        </details>
-
-        <details className="settings-panel">
-          <summary>Deploy Settings</summary>
-          <div className="settings-grid">
-            <label>
-              Custom slug (optional)
-              <input value={customSlug} placeholder="my-report" onChange={(event) => setCustomSlug(event.target.value)} />
-            </label>
-            <label>
-              Hostname (optional)
-              <input value={exportHostname} placeholder="report.fuhua.team" onChange={(event) => setExportHostname(event.target.value)} />
-            </label>
-            <label>
-              Server base dir
-              <input value={deployBaseDir} onChange={(event) => setDeployBaseDir(event.target.value)} />
-            </label>
-            <label>
-              SSH host
-              <input value={sshHost} placeholder="your-server-ip" onChange={(event) => setSshHost(event.target.value)} />
-            </label>
-            <label>
-              SSH user
-              <input value={sshUser} placeholder="root" onChange={(event) => setSshUser(event.target.value)} />
-            </label>
-            <label>
-              SSH port
-              <input value={sshPort} placeholder="22" onChange={(event) => setSshPort(event.target.value)} />
-            </label>
-            <label>
-              SSH private key path (optional)
-              <input value={sshPrivateKeyPath} placeholder="~/.ssh/id_rsa" onChange={(event) => setSshPrivateKeyPath(event.target.value)} />
-            </label>
-            <details className="advanced-settings">
-              <summary>Advanced</summary>
-              <label>
-                Computed remote root dir
-                <input value={computedRemoteRootDir} readOnly />
-              </label>
-              <label>
-                Override remote root dir (optional)
-                <input
-                  value={deployRemoteRootOverride}
-                  placeholder={computedRemoteRootDir || "/var/www/reports/r/xxxx"}
-                  onChange={(event) => setDeployRemoteRootOverride(event.target.value)}
-                />
-              </label>
-            </details>
-          </div>
-        </details>
-
-        {loading ? <p>Loading...</p> : null}
-        <div ref={containerRef} className={isSelectingMode ? "selecting-surface selecting-active" : "selecting-surface"}>
-          {!loading && page ? page.blocks.map((block) => <BlockView key={block.id} block={block} selected={selectedSet.has(block.id)} />) : null}
-        </div>
-
-        {selectionRect ? (
-          <div className="selection-rect" style={{ left: selectionRect.x, top: selectionRect.y, width: selectionRect.w, height: selectionRect.h }} />
-        ) : null}
-
-        {isSelectingMode && selectedIds.length > 0 && popoverPos ? (
-          <div className="selection-popover" style={{ left: popoverPos.x, top: popoverPos.y }}>
-            <div className="selection-count">Selected: {selectedIds.length}</div>
-            <input value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="Enter AI instruction" disabled={patching} />
-            <div className="selection-actions">
-              <button type="button" onClick={handleApplySelectionPatch} disabled={patching || !instruction.trim() || selectedIds.length === 0}>
-                {patching ? "Applying..." : "Apply"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  clearSelection();
-                  exitSelectingMode();
-                  setInstruction("");
-                }}
-                disabled={patching}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {message ? <div className="notice">{message}</div> : null}
-        {exportResult ? (
-          <div className="export-result">
-            <p>outDir: {exportResult.outDir}</p>
-            <p>urlPath: {exportResult.urlPath}</p>
-            {exportHostname.trim() ? <p>fullUrl: {`https://${exportHostname.trim()}${exportResult.urlPath}`}</p> : null}
-            <p>manifest: {exportResult.manifest.siteSlug} / {exportResult.manifest.version}</p>
-            <button type="button" onClick={handleDeploy} disabled={deploying || exporting || patching}>
-              {deploying ? "Deploying..." : "Deploy to server"}
+        <aside className="sidebar-pane">
+          <div className="module-tabs">
+            <button type="button" className={activeModule === "document" ? "tab-active" : ""} onClick={() => setActiveModule("document")}>
+              Document
             </button>
-            {deployResult ? <p>remoteRootDir: {deployResult.remoteRootDir}</p> : null}
-            {deployResult?.remoteUrl ? (
-              <p>
-                remoteUrl:{" "}
-                <a href={deployResult.remoteUrl} target="_blank" rel="noreferrer">
-                  {deployResult.remoteUrl}
-                </a>
+            <button type="button" className={activeModule === "ai" ? "tab-active" : ""} onClick={() => setActiveModule("ai")}>
+              AI
+            </button>
+            <button type="button" className={activeModule === "publish" ? "tab-active" : ""} onClick={() => setActiveModule("publish")}>
+              Publish
+            </button>
+          </div>
+
+          {activeModule === "document" ? (
+            <section className="module-card">
+              <h2>Document</h2>
+              <p>导入 DOCX 后，左侧会显示网页化预览。</p>
+              <button type="button" disabled={importing} onClick={() => fileInputRef.current?.click()}>
+                {importing ? "Importing..." : "Import .docx"}
+              </button>
+              <p className="module-note">当前页面：{currentPageId}</p>
+              <p className="module-note">
+                <a href="/reports">查看 Reports</a>
               </p>
-            ) : null}
-            {exportHostname.trim() ? (
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(`https://${exportHostname.trim()}${exportResult.urlPath}`);
-                    setMessage("Link copied");
-                  } catch {
-                    window.alert("Copy failed. Please copy link manually.");
-                  }
-                }}
-              >
-                Copy link
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(deployText);
-                  setMessage("Deploy steps copied");
-                } catch {
-                  window.alert("Copy failed. Please copy from the text area manually.");
-                }
-              }}
-              disabled={!deployText}
-            >
-              Copy deploy steps
-            </button>
-            <textarea readOnly value={deployText} rows={12} />
-          </div>
-        ) : null}
+            </section>
+          ) : null}
+
+          {activeModule === "ai" ? (
+            <section className="module-card">
+              <h2>AI Assistant</h2>
+              <div className="settings-grid">
+                <label>
+                  Base URL
+                  <input value={llmSettings.baseUrl} onChange={(event) => setLlmSettings((prev) => ({ ...prev, baseUrl: event.target.value }))} />
+                </label>
+                <label>
+                  API Key
+                  <input type="password" value={llmSettings.apiKey} onChange={(event) => setLlmSettings((prev) => ({ ...prev, apiKey: event.target.value }))} />
+                </label>
+                <label>
+                  Model (optional)
+                  <input
+                    value={llmSettings.model}
+                    placeholder={DEFAULT_MODEL}
+                    onChange={(event) => setLlmSettings((prev) => ({ ...prev, model: event.target.value }))}
+                  />
+                </label>
+              </div>
+
+              <div className="module-actions">
+                <button type="button" onClick={toggleSelectingMode} disabled={patching}>
+                  {isSelectingMode ? "Exit AI Select" : "AI Select"}
+                </button>
+                <button type="button" onClick={handleUndo} disabled={undoing || patching}>
+                  {undoing ? "Undoing..." : "Undo"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearSelection();
+                    setChatInput("");
+                  }}
+                  disabled={!isSelectingMode}
+                >
+                  Clear Selection
+                </button>
+              </div>
+
+              <p className="module-note">已选 block：{selectedIds.length}</p>
+              <p className="module-note">选中 block 后可在下方对话框输入指令并应用。</p>
+
+              <div className="ai-chat-embedded">
+                <h3>AI 对话</h3>
+                <div className="ai-chat-log">
+                  {chatMessages.length === 0 ? <p className="module-note">先开启 AI Select 并选择 block，再发送指令。</p> : null}
+                  {chatMessages.map((item) => (
+                    <div key={item.id} className={item.role === "user" ? "chat-item chat-user" : "chat-item chat-assistant"}>
+                      <strong>{item.role === "user" ? "你" : "AI"}：</strong>
+                      <span>{item.text}</span>
+                    </div>
+                  ))}
+                </div>
+                <textarea
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  placeholder="例如：把这段改得更正式，并补充一个结论段"
+                  disabled={patching}
+                  rows={4}
+                />
+                <div className="module-actions">
+                  <button type="button" onClick={() => void handleApplyAiChat()} disabled={patching || !chatInput.trim() || selectedIds.length === 0}>
+                    {patching ? "Sending..." : "发送并应用"}
+                  </button>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          {activeModule === "publish" ? (
+            <section className="module-card">
+              <h2>Publish & Deploy</h2>
+              <div className="settings-grid">
+                <label>
+                  Custom slug (optional)
+                  <input value={customSlug} placeholder="my-report" onChange={(event) => setCustomSlug(event.target.value)} />
+                </label>
+                <label>
+                  Hostname (optional)
+                  <input value={exportHostname} placeholder="report.fuhua.team" onChange={(event) => setExportHostname(event.target.value)} />
+                </label>
+                <label>
+                  Server base dir
+                  <input value={deployBaseDir} onChange={(event) => setDeployBaseDir(event.target.value)} />
+                </label>
+                <label>
+                  SSH host
+                  <input value={sshHost} placeholder="your-server-ip" onChange={(event) => setSshHost(event.target.value)} />
+                </label>
+                <label>
+                  SSH user
+                  <input value={sshUser} placeholder="root" onChange={(event) => setSshUser(event.target.value)} />
+                </label>
+                <label>
+                  SSH port
+                  <input value={sshPort} placeholder="22" onChange={(event) => setSshPort(event.target.value)} />
+                </label>
+                <label>
+                  SSH private key path (optional)
+                  <input value={sshPrivateKeyPath} placeholder="~/.ssh/id_rsa" onChange={(event) => setSshPrivateKeyPath(event.target.value)} />
+                </label>
+                <label>
+                  Computed remote root dir
+                  <input value={computedRemoteRootDir} readOnly />
+                </label>
+                <label>
+                  Override remote root dir (optional)
+                  <input
+                    value={deployRemoteRootOverride}
+                    placeholder={computedRemoteRootDir || "/var/www/reports/r/xxxx"}
+                    onChange={(event) => setDeployRemoteRootOverride(event.target.value)}
+                  />
+                </label>
+              </div>
+
+              <div className="module-actions">
+                <button type="button" onClick={handlePublish} disabled={exporting || !shouldShowPreview}>
+                  {exporting ? "Publishing..." : "Publish"}
+                </button>
+                <button type="button" onClick={handleDeploy} disabled={deploying || !exportResult}>
+                  {deploying ? "Deploying..." : "Deploy to server"}
+                </button>
+              </div>
+
+              {exportResult ? (
+                <div className="export-result">
+                  <p>outDir: {exportResult.outDir}</p>
+                  <p>urlPath: {exportResult.urlPath}</p>
+                  {exportHostname.trim() ? <p>fullUrl: {`https://${exportHostname.trim()}${exportResult.urlPath}`}</p> : null}
+                  <p>
+                    manifest: {exportResult.manifest.siteSlug} / {exportResult.manifest.version}
+                  </p>
+                  {deployResult ? <p>remoteRootDir: {deployResult.remoteRootDir}</p> : null}
+                  {deployResult?.remoteUrl ? (
+                    <p>
+                      remoteUrl:{" "}
+                      <a href={deployResult.remoteUrl} target="_blank" rel="noreferrer">
+                        {deployResult.remoteUrl}
+                      </a>
+                    </p>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(deployText);
+                        setMessage("Deploy steps copied");
+                      } catch {
+                        window.alert("Copy failed. Please copy from the text area manually.");
+                      }
+                    }}
+                    disabled={!deployText}
+                  >
+                    Copy deploy steps
+                  </button>
+                  <textarea readOnly value={deployText} rows={10} />
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
+          {message ? <div className="notice">{message}</div> : null}
+        </aside>
       </div>
+
     </main>
   );
 }
+
+
