@@ -7,7 +7,7 @@
     "build": "npm exec -- tsc -p tsconfig.json",
     "typecheck": "npm exec -- tsc -p tsconfig.json --noEmit",
     "start": "node dist/server.js",
-    "test": "echo test"
+    "test": "npm exec -- tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

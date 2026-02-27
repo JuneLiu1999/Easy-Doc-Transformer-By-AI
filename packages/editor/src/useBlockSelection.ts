@@ -30,6 +30,27 @@ function rectsIntersect(a: SelectionRect, b: SelectionRect): boolean {
   return a.x < bRight && aRight > b.x && a.y < bBottom && aBottom > b.y;
 }
 
+function pruneAncestorSelections(ids: Set<string>, container: HTMLElement): string[] {
+  const elements = Array.from(container.querySelectorAll<HTMLElement>("[data-block-id]"));
+  const selectedElements = elements.filter((el) => {
+    const id = el.dataset.blockId;
+    return Boolean(id && ids.has(id));
+  });
+
+  const keep = new Set<string>();
+  for (const element of selectedElements) {
+    const id = element.dataset.blockId;
+    if (!id) {
+      continue;
+    }
+    const hasSelectedDescendant = selectedElements.some((candidate) => candidate !== element && element.contains(candidate));
+    if (!hasSelectedDescendant) {
+      keep.add(id);
+    }
+  }
+  return Array.from(keep);
+}
+
 export function useBlockSelection(containerRef: RefObject<HTMLElement | null>) {
   const [isSelectingMode, setIsSelectingMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -140,13 +161,6 @@ export function useBlockSelection(containerRef: RefObject<HTMLElement | null>) {
         const blockRect: SelectionRect = { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
 
         if (isClick) {
-          if (rectsIntersect(blockRect, { x: event.clientX, y: event.clientY, w: 1, h: 1 })) {
-            if (dragStart.shift && nextIds.has(id)) {
-              nextIds.delete(id);
-            } else {
-              nextIds.add(id);
-            }
-          }
           continue;
         }
 
@@ -155,7 +169,24 @@ export function useBlockSelection(containerRef: RefObject<HTMLElement | null>) {
         }
       }
 
-      setSelectedIds(Array.from(nextIds));
+      if (isClick) {
+        const target = event.target instanceof Element ? event.target : null;
+        const closest = target?.closest<HTMLElement>("[data-block-id]");
+        const clickedId = closest?.dataset.blockId;
+        if (clickedId && container.contains(closest)) {
+          if (dragStart.shift && nextIds.has(clickedId)) {
+            nextIds.delete(clickedId);
+          } else {
+            nextIds.add(clickedId);
+          }
+        }
+        setSelectedIds(pruneAncestorSelections(nextIds, container));
+        setSelectionRect(null);
+        event.preventDefault();
+        return;
+      }
+
+      setSelectedIds(pruneAncestorSelections(nextIds, container));
       setSelectionRect(null);
       event.preventDefault();
     };

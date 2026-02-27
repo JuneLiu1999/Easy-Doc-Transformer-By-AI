@@ -1,2 +1,2 @@
-export type { LlmConfig } from "./provider";
-export { generatePatch, resolveModel } from "./provider";
+export type { LlmConfig, PatchDebugInfo, ProviderKind } from "./provider";
+export { generatePatch, generatePatchWithDebug, resolveModel } from "./provider";

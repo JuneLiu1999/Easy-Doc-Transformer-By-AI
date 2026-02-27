@@ -5,11 +5,12 @@ import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
-import { applyPatch, astToBlocks, demoPage, patchSchema, type Page } from "@packages/blocks";
-import { generatePatch, resolveModel, type LlmConfig } from "@packages/llm";
+import { applyPatch, astToBlocks, demoPage, patchSchema, type Block, type Page, type Patch } from "@packages/blocks";
+import { generatePatchWithDebug, resolveModel, type LlmConfig } from "@packages/llm";
 import { defaultTheme, renderToHtml } from "@packages/renderer";
 import { mockAiGeneratePatch } from "./ai/mockAi";
 import { parseDocxToAst } from "./docx/parseDocx";
+import { verifyProviderApiKey, type ProviderVerifyErrorCode } from "./provider/verify";
 import { generateSlug, sanitizeSlug } from "./utils/slug";
 const multipart = require("@fastify/multipart");
 
@@ -42,12 +43,48 @@ const EXPORTS_ROOT = path.join(REPO_ROOT, "exports");
 const PAGES_ROOT = path.join(REPO_ROOT, "data", "pages");
 const UPLOADS_ROOT = path.join(REPO_ROOT, "uploads");
 const DEFAULT_LLM_BASE_URL = "https://api.openai.com";
+const DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 const MAX_DOCX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_HISTORY = 20;
 const MAX_REPORTS = 200;
+const ENABLE_AI_PATCH_DEBUG_LOG = process.env.AI_PATCH_DEBUG_LOG !== "false";
+const MAX_LOG_FIELD_LENGTH = 5000;
+const ECHARTS_LOADER_JS = `(function () {
+  if (window.echarts) {
+    return;
+  }
+  var script = document.createElement("script");
+  script.src = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js";
+  script.async = true;
+  document.head.appendChild(script);
+})();`;
 
 const pageCache = new Map<string, Page>();
 const historyStackByPage = new Map<string, Page[]>();
+
+function trimForLog(value: string): string {
+  if (value.length <= MAX_LOG_FIELD_LENGTH) {
+    return value;
+  }
+  return `${value.slice(0, MAX_LOG_FIELD_LENGTH)}...<truncated>`;
+}
+
+function safeJsonForLog(value: unknown): string {
+  try {
+    return trimForLog(JSON.stringify(value));
+  } catch {
+    return "<non-serializable>";
+  }
+}
+
+app.get("/api/health", async () => {
+  return {
+    ok: true,
+    service: "api",
+    now: new Date().toISOString()
+  };
+});
 
 function readHeaderValue(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -56,20 +93,100 @@ function readHeaderValue(value: string | string[] | undefined): string {
   return value ?? "";
 }
 
+function mapProviderErrorToStatus(code: ProviderVerifyErrorCode): number {
+  if (code === "invalid_request") {
+    return 400;
+  }
+  if (code === "invalid_api_key") {
+    return 401;
+  }
+  if (code === "timeout" || code === "network_error") {
+    return 502;
+  }
+  if (code === "incompatible_endpoint") {
+    return 400;
+  }
+  return 500;
+}
+
+function normalizeProviderType(value: unknown): "openai_compatible" | "gemini" | "anthropic" | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "openai_compatible" || normalized === "openai") {
+    return "openai_compatible";
+  }
+  if (normalized === "gemini") {
+    return "gemini";
+  }
+  if (normalized === "anthropic") {
+    return "anthropic";
+  }
+  return undefined;
+}
+
+function defaultBaseUrlByProvider(provider: "openai_compatible" | "gemini" | "anthropic" | undefined): string {
+  if (provider === "gemini") {
+    return DEFAULT_GEMINI_BASE_URL;
+  }
+  if (provider === "anthropic") {
+    return DEFAULT_ANTHROPIC_BASE_URL;
+  }
+  return DEFAULT_LLM_BASE_URL;
+}
+
 function readLlmConfigFromHeaders(headers: Record<string, string | string[] | undefined>): LlmConfig {
-  const baseUrl = readHeaderValue(headers["x-llm-base-url"]).trim() || DEFAULT_LLM_BASE_URL;
+  const provider = normalizeProviderType(readHeaderValue(headers["x-llm-provider"]));
+  const baseUrl = readHeaderValue(headers["x-llm-base-url"]).trim() || defaultBaseUrlByProvider(provider);
   const requestedModel = readHeaderValue(headers["x-llm-model"]).trim();
   const apiKey = readHeaderValue(headers["x-llm-api-key"]).trim();
   return {
     baseUrl,
-    model: requestedModel || resolveModel(baseUrl),
-    apiKey
+    model: requestedModel || resolveModel(baseUrl, provider),
+    apiKey,
+    ...(provider ? { provider } : {})
   };
 }
 
-function isPatchInSelectedScope(patch: ReturnType<typeof patchSchema.parse>, selectedBlockIds: string[]): boolean {
+function collectDescendantIds(block: Block, set: Set<string>): void {
+  set.add(block.id);
+  if (block.type === "columns") {
+    for (const column of block.columns) {
+      for (const child of column.blocks) {
+        collectDescendantIds(child, set);
+      }
+    }
+  }
+}
+
+function isPatchInSelectedScope(
+  patch: ReturnType<typeof patchSchema.parse>,
+  page: Page,
+  selectedBlockIds: string[]
+): boolean {
   const selectedSet = new Set(selectedBlockIds);
-  return patch.ops.every((op) => (op.op === "insert_after" ? selectedSet.has(op.afterId) : selectedSet.has(op.id)));
+  const allowedSet = new Set<string>();
+
+  const walk = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (selectedSet.has(block.id)) {
+        collectDescendantIds(block, allowedSet);
+      }
+      if (block.type === "columns") {
+        for (const column of block.columns) {
+          walk(column.blocks);
+        }
+      }
+    }
+  };
+
+  walk(page.blocks);
+  if (allowedSet.size === 0) {
+    return false;
+  }
+
+  return patch.ops.every((op) => (op.op === "insert_after" ? allowedSet.has(op.afterId) : allowedSet.has(op.id)));
 }
 
 function sanitizeBasePath(input: string): string | null {
@@ -120,6 +237,83 @@ function sanitizeAbsolutePosixPath(input: string): string | null {
 
 function isPathInsideBase(baseDir: string, targetDir: string): boolean {
   return targetDir === baseDir || targetDir.startsWith(`${baseDir}/`);
+}
+
+function findBlockById(blocks: Block[], id: string): Block | null {
+  for (const block of blocks) {
+    if (block.id === id) {
+      return block;
+    }
+    if (block.type === "columns") {
+      for (const column of block.columns) {
+        const nested = findBlockById(column.blocks, id);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function instructionResizeDirection(instruction: string): "smaller" | "larger" | null {
+  if (/(变小|缩小|小一点|smaller|reduce|shrink)/i.test(instruction)) {
+    return "smaller";
+  }
+  if (/(变大|放大|大一点|larger|increase|enlarge)/i.test(instruction)) {
+    return "larger";
+  }
+  return null;
+}
+
+function patchTouchesImageSize(patch: Patch, page: Page): boolean {
+  return patch.ops.some((op) => {
+    if (op.op === "replace_block" && op.block.type === "image" && typeof op.block.widthPercent === "number") {
+      return true;
+    }
+    if (op.op === "insert_after" && op.block.type === "image" && typeof op.block.widthPercent === "number") {
+      return true;
+    }
+    if (op.op === "update_content") {
+      const target = findBlockById(page.blocks, op.id);
+      return Boolean(target && target.type === "image" && /\b(width|size|尺寸|宽度)\b/i.test(op.content));
+    }
+    return false;
+  });
+}
+
+function applyImageResizeFallback(patch: Patch, page: Page, selectedBlockIds: string[], instruction: string): Patch {
+  const direction = instructionResizeDirection(instruction);
+  if (!direction) {
+    return patch;
+  }
+  if (patchTouchesImageSize(patch, page)) {
+    return patch;
+  }
+
+  const imageTargets = selectedBlockIds
+    .map((id) => findBlockById(page.blocks, id))
+    .filter((block): block is Extract<Block, { type: "image" }> => Boolean(block && block.type === "image"));
+  if (imageTargets.length === 0) {
+    return patch;
+  }
+
+  const fallbackOps: Patch["ops"] = imageTargets.map((img) => {
+    const current = typeof img.widthPercent === "number" ? img.widthPercent : 100;
+    const next = direction === "smaller" ? Math.max(10, current - 20) : Math.min(100, current + 20);
+    return {
+      op: "replace_block",
+      id: img.id,
+      block: {
+        ...img,
+        widthPercent: next
+      }
+    };
+  });
+
+  return {
+    ops: [...patch.ops, ...fallbackOps]
+  };
 }
 
 function resolveRemoteRootDir(params: {
@@ -261,7 +455,8 @@ async function writeAssets(outDir: string, css: string): Promise<string[]> {
   const assetsDir = path.join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
   await writeFile(path.join(outDir, "assets", "style.css"), css, "utf8");
-  return ["assets/style.css"];
+  await writeFile(path.join(outDir, "assets", "echarts.min.js"), ECHARTS_LOADER_JS, "utf8");
+  return ["assets/style.css", "assets/echarts.min.js"];
 }
 
 app.get("/api/page/demo", async () => {
@@ -283,6 +478,52 @@ app.get("/api/page/:pageId", async (request, reply) => {
   }
 
   return page;
+});
+
+app.post("/api/page/:pageId/block/:blockId/content", async (request, reply) => {
+  const params = request.params as { pageId?: string; blockId?: string };
+  const pageId = typeof params.pageId === "string" ? params.pageId.trim() : "";
+  const blockId = typeof params.blockId === "string" ? params.blockId.trim() : "";
+
+  if (!pageId || !isValidPageId(pageId)) {
+    reply.code(400);
+    return { ok: false, error: "Invalid pageId" };
+  }
+  if (!blockId) {
+    reply.code(400);
+    return { ok: false, error: "Invalid blockId" };
+  }
+
+  const body = request.body;
+  if (typeof body !== "object" || body === null) {
+    reply.code(400);
+    return { ok: false, error: "Invalid request body" };
+  }
+
+  const { content } = body as { content?: unknown };
+  if (typeof content !== "string") {
+    reply.code(400);
+    return { ok: false, error: "content must be a string" };
+  }
+
+  const page = await loadPage(pageId);
+  if (!page) {
+    reply.code(404);
+    return { ok: false, error: "Page not found" };
+  }
+
+  try {
+    const patch = patchSchema.parse({
+      ops: [{ op: "update_content", id: blockId, content }]
+    });
+    const newPage = applyPatch(page, patch);
+    pushHistory(pageId, page);
+    await savePage(pageId, newPage);
+    return { ok: true, page: newPage };
+  } catch (error) {
+    reply.code(400);
+    return { ok: false, error: error instanceof Error ? error.message : "Failed to update block content" };
+  }
 });
 
 app.get("/api/reports", async (request) => {
@@ -343,6 +584,66 @@ app.get("/api/reports", async (request) => {
   reports.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
   return reports.slice(0, MAX_REPORTS);
 });
+
+app.post(
+  "/api/provider/verify",
+  {
+    schema: {
+      body: {
+        type: "object",
+        required: ["apiKey"],
+        properties: {
+          baseUrl: { type: "string", minLength: 1 },
+          apiKey: { type: "string", minLength: 1 },
+          provider: { type: "string", enum: ["openai_compatible", "gemini", "anthropic"] }
+        }
+      }
+    }
+  },
+  async (request, reply) => {
+    const body = request.body as { baseUrl?: unknown; apiKey?: unknown; provider?: unknown };
+    const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl : undefined;
+    const apiKey = typeof body.apiKey === "string" ? body.apiKey : "";
+    const provider = normalizeProviderType(body.provider);
+
+    const result = await verifyProviderApiKey({ baseUrl, apiKey, provider });
+    if (!result.ok) {
+      reply.code(mapProviderErrorToStatus(result.error.code));
+      return { ok: false, error: result.error };
+    }
+
+    return { ok: true, models: result.models };
+  }
+);
+
+app.get(
+  "/api/provider/models",
+  {
+    schema: {
+      querystring: {
+        type: "object",
+        properties: {
+          baseUrl: { type: "string", minLength: 1 },
+          provider: { type: "string", enum: ["openai_compatible", "gemini", "anthropic"] }
+        }
+      }
+    }
+  },
+  async (request, reply) => {
+    const query = request.query as { baseUrl?: unknown; provider?: unknown };
+    const baseUrl = typeof query.baseUrl === "string" ? query.baseUrl : undefined;
+    const provider = normalizeProviderType(query.provider);
+    const apiKey = readHeaderValue((request.headers as Record<string, string | string[] | undefined>)["x-provider-api-key"]).trim();
+
+    const result = await verifyProviderApiKey({ baseUrl, apiKey, provider });
+    if (!result.ok) {
+      reply.code(mapProviderErrorToStatus(result.error.code));
+      return { ok: false, error: result.error };
+    }
+
+    return { ok: true, models: result.models };
+  }
+);
 
 app.post("/api/import/docx", async (request, reply) => {
   const filePart = await (request as unknown as { file: () => Promise<any> }).file();
@@ -442,12 +743,50 @@ app.post("/api/patch/demo", async (request, reply) => {
       return { ok: false, error: "Missing API key. Please set AI Settings first." };
     }
 
-    const rawPatch = useMockAi
-      ? mockAiGeneratePatch(page, selectedBlockIds, instruction)
-      : await generatePatch(llmConfig, { page, selectedBlockIds, instruction });
-    const patch = patchSchema.parse(rawPatch);
+    let rawPatch: unknown;
+    if (useMockAi) {
+      rawPatch = mockAiGeneratePatch(page, selectedBlockIds, instruction);
+      if (ENABLE_AI_PATCH_DEBUG_LOG) {
+        app.log.info({
+          event: "ai_patch_debug_mock",
+          pageId: targetPageId,
+          selectedBlockIds,
+          instruction: trimForLog(instruction),
+          rawPatch: safeJsonForLog(rawPatch)
+        });
+      }
+    } else {
+      const patchWithDebug = await generatePatchWithDebug(llmConfig, { page, selectedBlockIds, instruction });
+      rawPatch = patchWithDebug.patch;
+      if (ENABLE_AI_PATCH_DEBUG_LOG) {
+        app.log.info({
+          event: "ai_patch_debug_provider",
+          pageId: targetPageId,
+          selectedBlockIds,
+          instruction: trimForLog(instruction),
+          provider: patchWithDebug.debug.provider,
+          endpoint: patchWithDebug.debug.endpoint,
+          model: patchWithDebug.debug.model,
+          promptChars: patchWithDebug.debug.promptChars,
+          selectedBlockCount: patchWithDebug.debug.selectedBlockCount,
+          rawContent: trimForLog(patchWithDebug.debug.rawContent),
+          parsed: safeJsonForLog(patchWithDebug.debug.parsed),
+          normalized: safeJsonForLog(patchWithDebug.debug.normalized),
+          validated: safeJsonForLog(patchWithDebug.debug.validated)
+        });
+      }
+    }
+    const patch = applyImageResizeFallback(patchSchema.parse(rawPatch), page, selectedBlockIds, instruction);
 
-    if (!isPatchInSelectedScope(patch, selectedBlockIds)) {
+    if (!isPatchInSelectedScope(patch, page, selectedBlockIds)) {
+      if (ENABLE_AI_PATCH_DEBUG_LOG) {
+        app.log.warn({
+          event: "ai_patch_scope_reject",
+          pageId: targetPageId,
+          selectedBlockIds,
+          patch: safeJsonForLog(patch)
+        });
+      }
       reply.code(400);
       return { ok: false, error: "Patch target out of selected scope" };
     }
@@ -458,6 +797,15 @@ app.post("/api/patch/demo", async (request, reply) => {
 
     return { ok: true, patch, page: newPage };
   } catch (error) {
+    if (ENABLE_AI_PATCH_DEBUG_LOG) {
+      app.log.error({
+        event: "ai_patch_apply_error",
+        pageId: targetPageId,
+        selectedBlockIds,
+        instruction: trimForLog(instruction),
+        error: error instanceof Error ? error.message : "unknown"
+      });
+    }
     reply.code(400);
     return { ok: false, error: error instanceof Error ? error.message : "Failed to apply patch" };
   }
@@ -661,8 +1009,8 @@ app.post("/api/deploy", async (request, reply) => {
 const start = async (): Promise<void> => {
   try {
     await app.register(cors, {
-      origin: ["http://localhost:3000"],
-      allowedHeaders: ["Content-Type", "x-llm-base-url", "x-llm-model", "x-llm-api-key"]
+      origin: true,
+      allowedHeaders: ["Content-Type", "x-llm-base-url", "x-llm-model", "x-llm-api-key", "x-llm-provider", "x-provider-api-key"]
     });
     await app.register(multipart, {
       limits: {

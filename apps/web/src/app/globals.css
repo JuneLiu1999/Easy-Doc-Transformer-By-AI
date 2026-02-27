@@ -125,6 +125,15 @@ button:disabled {
   margin-bottom: 8px;
 }
 
+.preview-canvas-edit-mode .demo-block-editable {
+  border: 1px dashed #94a3b8;
+  cursor: text;
+}
+
+.preview-canvas-edit-mode .demo-block-editable:hover {
+  background: #f8fafc;
+}
+
 .demo-block-selected {
   outline: 2px solid #2563eb;
   background: rgba(37, 99, 235, 0.08);
@@ -268,41 +277,108 @@ button:disabled {
   color: #475569;
 }
 
+.preview-chart-block {
+  margin: 20px 0;
+}
+
+.preview-chart-canvas {
+  width: 100%;
+  min-height: 240px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.preview-rich-block {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.preview-columns-block {
+  display: grid;
+  grid-template-columns: 1fr;
+  margin: 10px 0;
+}
+
+.preview-columns-col {
+  min-width: 0;
+}
+
 .sidebar-pane {
   position: sticky;
   top: 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  height: calc(100vh - 24px);
+  max-height: calc(100vh - 24px);
+  overflow: hidden;
 }
 
 .module-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px;
 }
 
 .module-tabs button {
-  background: #dbeafe;
-  color: #1e3a8a;
+  background: #f1f5f9;
+  color: #334155;
   font-weight: 600;
+  padding: 8px 10px;
 }
 
 .module-tabs button.tab-active {
   background: #1d4ed8;
   color: #ffffff;
+  box-shadow: 0 6px 16px rgba(29, 78, 216, 0.28);
 }
 
 .module-card {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 14px;
+  padding: 16px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+}
+
+.sidebar-module-slot {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.module-card-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .module-card h2 {
   margin: 0 0 10px;
   font-size: 17px;
+}
+
+.api-health-card h2 {
+  margin-bottom: 6px;
+}
+
+.api-health-ok {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.api-health-error {
+  border-color: #fecaca;
+  background: #fef2f2;
 }
 
 .module-card p {
@@ -373,6 +449,22 @@ button:disabled {
   resize: vertical;
 }
 
+.inline-edit-panel {
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  background: #eff6ff;
+  padding: 10px;
+}
+
+.inline-edit-panel textarea {
+  width: 100%;
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 14px;
+  resize: vertical;
+}
+
 @media (max-width: 1024px) {
   .workspace-shell {
     grid-template-columns: 1fr;
@@ -380,5 +472,16 @@ button:disabled {
 
   .sidebar-pane {
     position: static;
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .sidebar-module-slot {
+    overflow: visible;
+  }
+
+  .module-card-scroll {
+    overflow: visible;
   }
 }
